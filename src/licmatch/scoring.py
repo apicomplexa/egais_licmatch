@@ -27,6 +27,7 @@ import pandas as pd
 from rapidfuzz import fuzz, process
 
 from .geo import haversine_m
+from .names import brand_key, is_generic
 from .toponym import (ADDR_HOUSE_W, ADDR_STREET_W, SETTLEMENT_CONFLICT,
                       SETTLEMENT_ONE_SIDED, STREET_SET_W, STREET_SORT_W,
                       TYPE_CONFLICT, Toponym, address_score, house_similarity,
@@ -36,14 +37,20 @@ ROUTE_NONE, ROUTE_GEO, ROUTE_ADDR = -1, 0, 1
 ROUTE_NAMES = {ROUTE_GEO: "geo", ROUTE_ADDR: "address"}
 
 SIDE_COLUMNS = ("settlement", "street_type", "street", "house", "suffix",
-                "name_key", "latitude", "longitude")
+                "name_key", "alias_key", "latitude", "longitude")
+
+# Where a pair's name term came from -- `Scores.name_kind`.
+NAME_FUZZY = 0      # the two name keys compared as strings
+NAME_ALIAS = 1      # a known (fascia, holder) pair: scored 1.0 whatever the strings
+NAME_GENERIC = 2    # a generic fascia: the term is not scored at all
+NAME_KINDS = {NAME_FUZZY: "fuzzy", NAME_ALIAS: "alias", NAME_GENERIC: "generic"}
 
 
 @dataclass(frozen=True)
 class MatchParams:
     """Every number the join can be argued about, in one place.
 
-    The defaults are the calibrated ones (see `docs/METHODOLOGY.md`, §5); a
+    The defaults are the calibrated ones (see `docs/METHODOLOGY.md`, §13); a
     caller changes them with `replace()` or by passing keywords, and any run
     that does must say so beside its numbers.
     """
@@ -70,6 +77,12 @@ class MatchParams:
     addr_route_house: float = 0.85
     # Reported separately: the tier that needs no argument.
     strong: float = 0.75
+    # A generic fascia ("Продукты", or a bare "Кафе" that reduces to nothing)
+    # carries no information about its holder, so scoring its name as a zero
+    # would penalise it for something it never claimed.  With this on, the name
+    # term is dropped for such pairs and the other weights renormalised -- the
+    # same treatment the address route gives a missing coordinate.
+    neutral_generic: bool = True
 
     def __post_init__(self) -> None:
         if min(self.w_addr, self.w_name, self.w_dist) < 0:
@@ -78,6 +91,8 @@ class MatchParams:
             raise ValueError("the address-only route needs w_addr + w_name > 0")
         if self.max_m <= 0:
             raise ValueError("max_m must be positive")
+        if self.neutral_generic and self.w_addr + self.w_dist <= 0:
+            raise ValueError("neutral_generic needs w_addr + w_dist > 0")
 
     @property
     def weights(self) -> tuple[float, float, float]:
@@ -91,22 +106,28 @@ DEFAULTS = MatchParams()
 
 
 def side(toponyms: Iterable[Toponym], names: Iterable[str],
-         latitude, longitude) -> pd.DataFrame:
+         latitude, longitude, alias_keys: Iterable[str] | None = None) -> pd.DataFrame:
     """One side of the join in the canonical schema the scorer reads.
 
     This is the whole interface between a source and this package: whatever a
     source's column names, dialect or file format, an adapter parses it into
     toponyms and names and hands the result here.  Nothing downstream can tell
     the two sides apart.
+
+    `alias_keys` is what a known (fascia, holder) pair is looked up by -- on a
+    register side, an identifier such as a tax number is better than the name,
+    which two unrelated companies can share.  It defaults to the name key.
     """
     top = list(toponyms)
+    names = list(names)
     out = pd.DataFrame({
         "settlement": [t.settlement for t in top],
         "street_type": [t.street_type for t in top],
         "street": [t.street for t in top],
         "house": [t.house for t in top],
         "suffix": [t.suffix for t in top],
-        "name_key": list(names),
+        "name_key": names,
+        "alias_key": names if alias_keys is None else [str(v) for v in alias_keys],
         "latitude": pd.to_numeric(pd.Series(list(latitude)), errors="coerce").to_numpy(),
         "longitude": pd.to_numeric(pd.Series(list(longitude)), errors="coerce").to_numpy(),
     })
@@ -116,19 +137,34 @@ def side(toponyms: Iterable[Toponym], names: Iterable[str],
 
 
 def pair_score(a: Toponym, b: Toponym, name_a: str, name_b: str,
-               distance_m: float | None, params: MatchParams = DEFAULTS) -> float:
+               distance_m: float | None, params: MatchParams = DEFAULTS, *,
+               alias: bool = False) -> float:
     """The published formula for one pair; `score_matrix()` vectorises exactly this.
 
     `distance_m is None` takes the address route: the distance term is dropped
-    and the two remaining weights are renormalised.  Admission (both floors, and
-    the address route's own bars) is `accept()`'s business, not this function's.
+    and the two remaining weights are renormalised.  `alias=True` says the pair
+    is a known (fascia, holder) one, whose name term is 1.0 whatever the
+    strings.  A generic fascia (`names.is_generic`) has its name term dropped
+    the same way, when `params.neutral_generic` is on.  Admission (both floors,
+    and the address route's own bars) is `accept()`'s business, not this one's.
     """
     adr = address_score(a, b)
-    nam = fuzz.WRatio(name_a, name_b) / 100.0 if (name_a and name_b) else 0.0
+    if alias:
+        nam = 1.0
+    else:
+        nam = fuzz.WRatio(name_a, name_b) / 100.0 if (name_a and name_b) else 0.0
+    generic = params.neutral_generic and not alias and is_generic(name_a)
     if distance_m is None:
+        if generic:
+            return adr
         return (params.w_addr * adr + params.w_name * nam) / (params.w_addr + params.w_name)
-    return (params.w_addr * adr + params.w_name * nam
-            + params.w_dist * max(0.0, 1.0 - float(distance_m) / params.max_m))
+    dsc = max(0.0, 1.0 - float(distance_m) / params.max_m)
+    if generic:
+        # Same total weight, the name's share handed to the other two terms.
+        total_w = params.w_addr + params.w_name + params.w_dist
+        return ((params.w_addr * adr + params.w_dist * dsc)
+                * total_w / (params.w_addr + params.w_dist))
+    return params.w_addr * adr + params.w_name * nam + params.w_dist * dsc
 
 
 # --------------------------------------------------------------------------
@@ -148,6 +184,7 @@ class Scores:
     house: np.ndarray
     distance: np.ndarray
     method: np.ndarray            # ROUTE_GEO / ROUTE_ADDR / ROUTE_NONE
+    name_kind: np.ndarray | None = None   # NAME_FUZZY / NAME_ALIAS / NAME_GENERIC
 
     def __getitem__(self, key: str) -> np.ndarray:
         try:
@@ -157,7 +194,8 @@ class Scores:
 
     def as_dict(self) -> Mapping[str, np.ndarray]:
         return {f: getattr(self, f) for f in
-                ("score", "addr", "name", "street", "house", "distance", "method")}
+                ("score", "addr", "name", "street", "house", "distance", "method",
+                 "name_kind")}
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -189,8 +227,14 @@ def _codes(left: pd.Series, right: pd.Series):
 
 
 def score_matrix(a: pd.DataFrame, b: pd.DataFrame,
-                 params: MatchParams = DEFAULTS) -> Scores:
+                 params: MatchParams = DEFAULTS, *,
+                 aliases: Iterable[tuple[str, str]] | None = None) -> Scores:
     """Every (a x b) pair scored, as dense float32 matrices.
+
+    `aliases` is a set of known (a alias_key, b alias_key) pairs -- a fascia and
+    the company that trades under it -- whose name term is 1.0 whatever the two
+    strings say.  `brands.learn_brands()` produces such a set; a hand-kept list
+    works the same way.
 
     Dense on purpose: a city-sized join is a few million pairs, which keeps the
     code the same shape as the formula it implements.  Blocking would buy speed
@@ -236,6 +280,28 @@ def score_matrix(a: pd.DataFrame, b: pd.DataFrame,
     name[a["name_key"].to_numpy() == "", :] = 0.0
     name[:, b["name_key"].to_numpy() == ""] = 0.0
 
+    kind = np.full(name.shape, NAME_FUZZY, dtype=np.int8)
+    if aliases:
+        # Side a is compared on `brand_key`, the key `learn_brands()` counts
+        # fascias by: otherwise a learned ("красное белое", h) pair never meets
+        # the "красное&белое" that `name_key()` leaves on the side.
+        ak = [brand_key(k) for k in _alias_col(a)]; bk = _alias_col(b)
+        pairs = {(brand_key(str(k)), str(v)) for k, v in aliases}
+        a_of = {k: [] for k, _ in pairs}
+        for k, v in pairs:
+            a_of[k].append(v)
+        b_index = pd.Index(bk)
+        for i, k in enumerate(ak):
+            for v in a_of.get(k, ()):
+                cols = np.flatnonzero(b_index == v)
+                name[i, cols] = 1.0
+                kind[i, cols] = NAME_ALIAS
+    generic = np.zeros(name.shape, dtype=bool)
+    if params.neutral_generic:
+        gen_a = np.array([is_generic(k) for k in a["name_key"]], dtype=bool)
+        generic = gen_a[:, None] & (kind != NAME_ALIAS)
+        kind = np.where(generic, NAME_GENERIC, kind).astype(np.int8)
+
     dist = haversine_m(
         np.asarray(a["latitude"], dtype=float)[:, None],
         np.asarray(a["longitude"], dtype=float)[:, None],
@@ -246,13 +312,20 @@ def score_matrix(a: pd.DataFrame, b: pd.DataFrame,
     dscore = np.where(near, 1.0 - dist / max_m, 0.0).astype(np.float32)
 
     total = w_addr * addr + w_name * name + w_dist * dscore
+    if generic.any():
+        # The name's share handed to the other two terms, total weight kept.
+        total_w = w_addr + w_name + w_dist
+        total = np.where(generic, (w_addr * addr + w_dist * dscore)
+                         * (total_w / (w_addr + w_dist)), total)
     # The address-only route: no coordinate exists, so the distance term is
     # dropped rather than scored as a zero, and the two remaining terms must
     # clear a higher bar on their own.
     no_coord = np.isnan(dist)
     addr_route = (no_coord & (street >= params.addr_route_street)
                   & (house >= params.addr_route_house))
-    total = np.where(addr_route, (w_addr * addr + w_name * name) / (w_addr + w_name), total)
+    route_total = (w_addr * addr + w_name * name) / (w_addr + w_name)
+    route_total = np.where(generic, addr, route_total)
+    total = np.where(addr_route, route_total, total)
     total = np.where(near | addr_route, total, np.nan).astype(np.float32)
 
     return Scores(
@@ -260,7 +333,14 @@ def score_matrix(a: pd.DataFrame, b: pd.DataFrame,
         distance=np.where(near, dist, np.nan).astype(np.float32),
         method=np.where(near, ROUTE_GEO,
                         np.where(addr_route, ROUTE_ADDR, ROUTE_NONE)).astype(np.int8),
+        name_kind=kind,
     )
+
+
+def _alias_col(df: pd.DataFrame) -> list[str]:
+    """The alias key column, falling back to the name key for older sides."""
+    col = "alias_key" if "alias_key" in df.columns else "name_key"
+    return [str(v) for v in df[col]]
 
 
 def accepted(scores: Scores, params: MatchParams = DEFAULTS) -> np.ndarray:
@@ -270,6 +350,7 @@ def accepted(scores: Scores, params: MatchParams = DEFAULTS) -> np.ndarray:
 
 
 __all__ = ["MatchParams", "DEFAULTS", "Scores", "ROUTE_GEO", "ROUTE_ADDR",
+           "NAME_FUZZY", "NAME_ALIAS", "NAME_GENERIC", "NAME_KINDS",
            "ROUTE_NONE", "ROUTE_NAMES", "SIDE_COLUMNS", "side", "pair_score",
            "score_matrix", "accepted", "street_similarity", "house_similarity",
            "address_score"]

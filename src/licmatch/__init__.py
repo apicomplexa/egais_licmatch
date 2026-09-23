@@ -32,19 +32,22 @@ two floors rather than one, and what the result may and may not be read as -- is
 from __future__ import annotations
 
 from .geo import EARTH_R_M, haversine_m
-from .names import (RU_RETAIL_ALIASES, SHORT_NAME_MARKER, TRADE_AND_LEGAL_NOISE,
-                    fascia_name, holder_name, name_key)
-from .scoring import (DEFAULTS, ROUTE_ADDR, ROUTE_GEO, ROUTE_NAMES, ROUTE_NONE,
+from .brands import BRAND_DEFAULTS, BrandParams, BrandResult, learn_brands
+from .names import (GENERIC_FASCIAS, RU_RETAIL_ALIASES, SHORT_NAME_MARKER,
+                    TRADE_AND_LEGAL_NOISE, brand_key, fascia_name, holder_name,
+                    is_generic, name_key)
+from .scoring import (DEFAULTS, NAME_ALIAS, NAME_FUZZY, NAME_GENERIC, NAME_KINDS,
+                      ROUTE_ADDR, ROUTE_GEO, ROUTE_NAMES, ROUTE_NONE,
                       SIDE_COLUMNS, MatchParams, Scores, accepted, pair_score,
                       score_matrix, side)
-from .select import PREFER_LIFT, Selection, claimed_keys, select
+from .select import PREFER_LIFT, Selection, claimed_keys, greedy_assign, select
 from .text import fold, stem, stem_all, words
 from .toponym import (TYPE_TABLE, Toponym, address_score, home_city_re,
                       house_parts, house_similarity, parse_address_fields,
                       parse_address_line, settlement_name, street_similarity,
                       street_toponym)
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "__version__",
@@ -56,10 +59,13 @@ __all__ = [
     "address_score", "street_similarity", "house_similarity",
     # names
     "name_key", "holder_name", "fascia_name", "RU_RETAIL_ALIASES",
-    "TRADE_AND_LEGAL_NOISE", "SHORT_NAME_MARKER",
+    "TRADE_AND_LEGAL_NOISE", "SHORT_NAME_MARKER", "brand_key", "is_generic",
+    "GENERIC_FASCIAS", "NAME_FUZZY", "NAME_ALIAS", "NAME_GENERIC", "NAME_KINDS",
+    # brands learned from the data
+    "learn_brands", "BrandParams", "BrandResult", "BRAND_DEFAULTS",
     # scoring and selection
     "side", "SIDE_COLUMNS", "pair_score", "score_matrix", "accepted", "Scores",
-    "select", "Selection", "claimed_keys", "PREFER_LIFT",
+    "select", "Selection", "claimed_keys", "greedy_assign", "PREFER_LIFT",
     "ROUTE_GEO", "ROUTE_ADDR", "ROUTE_NONE", "ROUTE_NAMES",
     # primitives
     "haversine_m", "EARTH_R_M", "fold", "stem", "stem_all", "words",

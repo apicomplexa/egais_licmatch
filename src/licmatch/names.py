@@ -58,6 +58,36 @@ def name_key(text: str, *, aliases=RU_RETAIL_ALIASES,
     return aliases.get(out.replace("-", " "), out)
 
 
+def brand_key(key: str) -> str:
+    """A name key with the ampersand spelling folded out.
+
+    `name_key()` keeps "&" inside a token and drops it standing alone, so
+    "Красное&Белое" and "Красное & Белое" reach two different keys.  Counting a
+    fascia across addresses needs one; scoring a pair never looks at this key.
+    """
+    return " ".join(key.replace("&", " ").split())
+
+
+# Fascias that name a *kind* of shop rather than a shop.  The name term cannot
+# say anything about them -- a hundred owners trade as "Продукты" -- so it is
+# not scored for them (see `scoring`), and brand learning never counts them.
+# Keys as `name_key()` leaves them: the trade descriptors in
+# TRADE_AND_LEGAL_NOISE are already gone, which is why "Кафе" or "Бар" alone
+# reduce to "" and need no entry here.
+GENERIC_FASCIAS = frozenset({
+    "", "продукты", "продукт", "продуктов", "продукты 24", "24 часа", "24",
+    "круглосуточный", "у дома", "алкоголь", "алкомаркет", "пиво",
+    "разливное пиво", "пиво разливное", "пивной", "вино", "вина", "напитки",
+    "табак", "табачный", "табачные изделия", "сигареты", "товары",
+    "смешанные товары", "хлеб", "бистро", "закусочная", "пивная",
+})
+
+
+def is_generic(key: str) -> bool:
+    """Whether a name key names a kind of shop rather than a shop."""
+    return brand_key(key) in GENERIC_FASCIAS
+
+
 def holder_name(v, *, aliases=RU_RETAIL_ALIASES,
                 noise=TRADE_AND_LEGAL_NOISE) -> str:
     """A register's holder name reduced to its distinctive part.
